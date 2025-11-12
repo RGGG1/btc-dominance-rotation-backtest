@@ -17,7 +17,7 @@ Strategy:
     else: linear between
 
 - Alts bucket: market-cap–weighted basket of the top N alts.
-- Start: 2023-01-01 with $100
+- Start: DESIRED_START_DATE (but actual start may be clamped by API limits)
     - Split according to wBTC(dom(start)).
 - Then each day:
     - Add DAILY_DCA dollars (e.g. $10).
@@ -27,13 +27,15 @@ Strategy:
 - Output: annual summary and full-period results.
 
 NOTE:
-- This uses CoinGecko public API.
+- This uses CoinGecko API.
 - Set your CoinGecko API key via environment variable COINGECKO_API_KEY.
+- Free/public plans only allow historical data for roughly the last 365 days,
+  so we clamp the start date accordingly.
 """
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 import pandas as pd
@@ -51,8 +53,10 @@ if not COINGECKO_API_KEY:
 
 BASE_URL = "https://api.coingecko.com/api/v3"
 
-START_DATE = "2023-01-01"
-END_DATE   = "2025-11-01"
+# What you conceptually want as the start
+DESIRED_START_DATE = "2023-01-01"
+# End date for the analysis
+END_DATE           = "2025-11-01"
 
 TOP_N_ALTS = 20  # number of non-stable alts in the alt basket
 
@@ -79,6 +83,9 @@ STABLE_IDS = {
     "first-digital-usd",
     "lusd",            # Liquity USD
     "paxos-usd",
+    # Extra ones we saw popping up:
+    "usds",
+    "binance-bridged-usdt-bnb-smart-chain",
 }
 
 
@@ -88,7 +95,7 @@ STABLE_IDS = {
 def cg_get(path, params=None, sleep_sec=1.2):
     """
     Simple CoinGecko GET wrapper with API key + crude rate limiting.
-    Uses the demo/pro key header parameter 'x_cg_demo_api_key'.
+    Uses the demo/pro key header parameter 'x-cg-demo-api-key'.
     Adjust if your plan uses a different mechanism.
     """
     if params is None:
@@ -173,6 +180,20 @@ def date_to_unix(date_str):
     return dt.timestamp()
 
 
+def get_effective_dates():
+    """
+    CoinGecko free/public plans typically limit historical range (e.g. last 365 days).
+    We clamp the start date so the range does not exceed 365 days.
+    """
+    desired_start = datetime.strptime(DESIRED_START_DATE, "%Y-%m-%d").date()
+    end_date = datetime.strptime(END_DATE, "%Y-%m-%d").date()
+
+    max_span_start = end_date - timedelta(days=365)
+    effective_start = max(desired_start, max_span_start)
+
+    return effective_start, end_date
+
+
 # -------------- STRATEGY LOGIC --------------
 
 
@@ -201,7 +222,8 @@ def build_market_data():
 
     all_ids = ["bitcoin"] + alt_ids
 
-    from_ts = date_to_unix(START_DATE)
+    effective_start, effective_end = get_effective_dates()
+    from_ts = date_to_unix(effective_start.strftime("%Y-%m-%d"))
     to_ts = date_to_unix(END_DATE)
 
     frames = []
@@ -235,9 +257,9 @@ def run_backtest(price_df, mcap_df, alt_ids):
     Returns a DataFrame 'res' with:
       date, portfolio, btc_only, dom, wBTC
     """
-    mask = (price_df.index >= datetime.strptime(START_DATE, "%Y-%m-%d").date()) & (
-        price_df.index <= datetime.strptime(END_DATE, "%Y-%m-%d").date()
-    )
+    effective_start, effective_end = get_effective_dates()
+    mask = (price_df.index >= effective_start) & (price_df.index <= effective_end)
+
     prices = price_df[mask].copy()
     mcaps = mcap_df[mask].copy()
 
@@ -408,7 +430,9 @@ def summarize_results(res):
 
 def main():
     print("=== BTC Dominance Rotation Backtest (BTC vs Top-20 Alts, ex-stables) ===")
-    print(f"Date range: {START_DATE} → {END_DATE}")
+    eff_start, eff_end = get_effective_dates()
+    print(f"Desired date range: {DESIRED_START_DATE} → {END_DATE}")
+    print(f"Effective date range (API-limited): {eff_start} → {eff_end}")
     print(f"Dominance bands: {LOWER_BAND:.2f} – {UPPER_BAND:.2f}")
     print("NOTE: These bands are provisional; we should revisit & widen them later.\n")
 
@@ -422,3 +446,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
